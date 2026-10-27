@@ -1,0 +1,96 @@
+# =============================================================================
+# Docker Compose for NVIDIA Nemotron 3.5 Lightning 30B-A3B NVFP4 on DGX Spark
+# (GB10 / SM121) served with vLLM + DSpark speculative decoding.
+# =============================================================================
+#
+# Uses the official NVIDIA vLLM recipe (image vllm/vllm-openai:v0.27.1), the
+# same engine family as the other serving dirs under /opt. Weights live
+# together under /opt/ComfyUI/models (HF_HOME bind-mounted so the cache
+# populates there). The container does not auto-restart.
+#
+# Usage:
+#   cp .env.example .env            # First time only (set the HF token)
+#   docker compose up -d            # Start the service (vLLM pulls weights on
+#                                   # first run into the shared HF cache)
+#   docker compose logs -f          # View logs
+#   docker compose down             # Stop and remove the container
+#
+# Client sampling: temperature 1.0, top_p 0.95 (per the model card).
+# =============================================================================
+
+services:
+  nemotron:
+    image: ${IMAGE:-vllm/vllm-openai:v0.27.1}
+    container_name: ${CONTAINER_NAME:-nemotron-3.5-lightning-nvfp4}
+    # Do not auto-restart; the service is started explicitly.
+    restart: ${RESTART_POLICY:-no}
+
+    network_mode: host
+    ipc: host
+    shm_size: "32gb"
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    cap_add:
+      - IPC_LOCK
+    ulimits:
+      memlock: -1
+      stack: 67108864
+
+    volumes:
+      # Shared model cache under /opt/ComfyUI/models.
+      - ${HF_HOME_HOST:-/opt/ComfyUI/models/hf-cache}:/root/.cache/huggingface
+
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+      - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+      - VLLM_TRUST_REMOTE_CODE=1
+      # WSL2 has no UVA/pinned memory, which Model Runner V2 requires.
+      - VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-0}
+
+    # Official NVIDIA DGX Spark (GB10) vLLM recipe with DSpark speculative
+    # decoding. Entrypoint is `vllm serve`; these are its arguments.
+    command:
+      - --model
+      - ${MODEL_ID:-nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4}
+      - --served-model-name
+      - ${SERVED_MODEL_NAME:-nemotron-3.5-lightning-nvfp4}
+      - --host
+      - ${HOST:-0.0.0.0}
+      - --port
+      - "${PORT:-11434}"
+      - --moe-backend
+      - marlin
+      - --kv-cache-dtype
+      - fp8
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-262144}"
+      - --enable-prefix-caching
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.85}"
+      - --mamba-backend
+      - flashinfer
+      - --mamba-cache-mode
+      - align
+      - --reasoning-parser
+      - nemotron_v3
+      - --tool-call-parser
+      - qwen3_coder
+      - --enable-auto-tool-choice
+      # DSpark speculative decoding (--speculative_config.model <draft>,
+      # --speculative_config.num_speculative_tokens 3) is disabled: it needs
+      # Model Runner V2, which needs UVA/pinned memory, unavailable on WSL2.
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${PORT:-11434}/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: ${HEALTH_TIMEOUT_S:-900}s

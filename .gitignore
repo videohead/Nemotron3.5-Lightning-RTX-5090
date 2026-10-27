@@ -2,3 +2,5 @@
 .sglang.log
 .sglang.pid
 *.pid
+# Local runtime config (contains HUGGING_FACE_HUB_TOKEN)
+.env
